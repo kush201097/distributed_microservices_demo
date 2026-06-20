@@ -1,0 +1,54 @@
+server:
+  port: 8084
+
+spring:
+  application:
+    name: card-activation-service
+
+  # ── Microsoft SQL Server ─────────────────────────────────────────────
+  datasource:
+    url: jdbc:sqlserver://localhost:1433;databaseName=activation_db;encrypt=false;trustServerCertificate=true
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+    username: sa
+    password: ZBank@12345
+
+  jpa:
+    database-platform: org.hibernate.dialect.SQLServerDialect
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+  # ── RabbitMQ ─────────────────────────────────────────────────────────
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+
+app:
+  rabbitmq:
+    exchange: zbank.exchange
+    queue:
+      card-activation: card-activation-queue
+    routing-key:
+      application-submitted: zbank.application.submitted
+      card-activated: zbank.card.activated
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+  datasource:
+    url: jdbc:sqlserver://your-mssql-server:1433;databaseName=activation_db;encrypt=true;trustServerCertificate=false
+    username: zbank
+    password: your-prod-password
+  jpa:
+    hibernate:
+      ddl-auto: validate

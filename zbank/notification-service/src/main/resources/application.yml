@@ -1,0 +1,77 @@
+server:
+  port: 8086
+
+spring:
+  application:
+    name: notification-service
+
+  # ── Microsoft SQL Server ─────────────────────────────────────────────
+  datasource:
+    url: jdbc:sqlserver://localhost:1433;databaseName=notif_db;encrypt=false;trustServerCertificate=true
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+    username: sa
+    password: ZBank@12345
+
+  jpa:
+    database-platform: org.hibernate.dialect.SQLServerDialect
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+  # ── RabbitMQ ─────────────────────────────────────────────────────────
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+
+  # ── Mail (dev: point to a mock / MailHog SMTP) ──────────────────────
+  mail:
+    host: localhost
+    port: 1025      # MailHog default SMTP port (use for dev)
+    username:
+    password:
+    properties:
+      mail:
+        smtp:
+          auth: false
+          starttls:
+            enable: false
+
+app:
+  rabbitmq:
+    exchange: zbank.exchange
+    queue:
+      notification: notification-queue
+    routing-key:
+      card-activated: zbank.card.activated
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+  datasource:
+    url: jdbc:sqlserver://your-mssql-server:1433;databaseName=notif_db;encrypt=true;trustServerCertificate=false
+    username: zbank
+    password: your-prod-password
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  mail:
+    host: smtp.your-provider.com
+    port: 587
+    username: your-email@example.com
+    password: your-smtp-password
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true

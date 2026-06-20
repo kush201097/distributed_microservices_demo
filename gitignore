@@ -1,0 +1,47 @@
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Eclipse / Spring Tool Suite
+.project
+.classpath
+.settings/
+.springBeans
+.sts4-cache/
+
+# VS Code
+.vscode/
+
+# Maven
+target/
+
+# Gradle
+build/
+.gradle/
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment and local config
+.env
+*.env
+application-local.yml
+application-local.properties
+
+# Temporary files
+*.tmp
+*.temp

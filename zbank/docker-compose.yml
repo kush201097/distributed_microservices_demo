@@ -1,0 +1,59 @@
+services:
+
+  # ── RabbitMQ (with management UI) ────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: zbank-rabbitmq
+    ports:
+      - "5672:5672"     # AMQP port (services connect here)
+      - "15672:15672"   # Management UI  →  http://localhost:15672
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Microsoft SQL Server 2022 ─────────────────────────────────────────
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: zbank-sqlserver
+    ports:
+      - "1433:1433"
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "ZBank@12345"
+      MSSQL_PID: "Developer"   # Free Developer edition
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    healthcheck:
+      test: /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "ZBank@12345" -C -Q "SELECT 1" || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s   # SQL Server takes ~20s to initialise
+
+  # ── SQL Server DB initialisation (runs once after sqlserver is healthy)
+  sqlserver-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: zbank-sqlserver-init
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    volumes:
+      - ./init-db.sql:/init-db.sql
+    command: >
+      /bin/bash -c "
+        /opt/mssql-tools18/bin/sqlcmd
+          -S sqlserver -U sa -P 'ZBank@12345' -C
+          -i /init-db.sql
+      "
+    restart: "no"
+
+volumes:
+  rabbitmq-data:
+  sqlserver-data:

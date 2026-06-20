@@ -1,0 +1,45 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: auth-service
+
+  # ── Microsoft SQL Server ─────────────────────────────────────────────
+  datasource:
+    url: jdbc:sqlserver://localhost:1433;databaseName=auth_db;encrypt=false;trustServerCertificate=true
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+    username: sa
+    password: ZBank@12345
+
+  jpa:
+    database-platform: org.hibernate.dialect.SQLServerDialect
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+# ── JWT configuration ───────────────────────────────────────────────
+app:
+  jwt:
+    secret: ZBankSuperSecretKeyForJWTSigning2024ChangeInProduction
+    expiration-ms: 86400000   # 24 hours
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+
+---
+# ── Production profile — change host/credentials as needed ──────────
+spring:
+  config:
+    activate:
+      on-profile: prod
+  datasource:
+    url: jdbc:sqlserver://your-mssql-server:1433;databaseName=auth_db;encrypt=true;trustServerCertificate=false
+    username: zbank
+    password: your-prod-password
+  jpa:
+    hibernate:
+      ddl-auto: validate
