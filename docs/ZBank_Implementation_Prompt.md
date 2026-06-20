@@ -10,12 +10,12 @@ You are implementing **Z Bank**, a credit card management system built using a *
 
 ## Overall Architecture
 
-Six standalone Spring Boot microservices, each with its own database, communicating via REST (sync) and a message broker (async):
+Seven standalone Spring Boot microservices, each with its own database, communicating via REST (sync) and a message broker (async):
 
 | # | Service | Port | Responsibility |
 |---|---------|------|----------------|
-| 1 | API Gateway | 8080 | Route all requests, forward JWT token |
-| 2 | Auth Service | 8081 | Issue and validate JWT tokens |
+| 1 | API Gateway | 8080 | Route all requests, validate user JWT, forward user context |
+| 2 | Auth Service | 8081 | Issue and validate user JWTs and service-to-service JWTs |
 | 3 | Card Application Service | 8082 | Accept and submit new credit card applications |
 | 4 | Credit Rating Service | 8083 | Calculate or look up credit scores |
 | 5 | Card Activation Service | 8084 | Approve/reject application, assign card type and limit |
@@ -23,9 +23,14 @@ Six standalone Spring Boot microservices, each with its own database, communicat
 | 7 | Notification Service | 8086 | Deliver email/SMS/push notifications on card activation |
 
 **Message Broker:** RabbitMQ (or Kafka — choose one and be consistent)
-**Databases:** Each service uses its own H2 (dev) / PostgreSQL (prod) database. No shared DB.
+**Databases:** Each service uses its own Microsoft SQL Server database. No shared DB.
 **Language:** Java 17+, Spring Boot 3.x
 **Build tool:** Maven (multi-module project)
+
+**Authentication model:**
+- **User authentication:** External clients authenticate with email/password. Auth Service issues a user JWT used by API Gateway and protected user-facing APIs.
+- **Machine-to-machine (M2M) authentication:** Internal services authenticate with client credentials. Auth Service issues short-lived service JWTs used for synchronous internal REST calls.
+- **Broker authentication:** RabbitMQ credentials protect broker access. Event payloads must also include producer metadata for traceability, but RabbitMQ username/password is the transport-level authentication mechanism.
 
 ---
 
@@ -52,8 +57,8 @@ zbank/
 
 **Responsibilities:**
 - Route all inbound HTTP requests to the correct downstream service
-- Forward the `Authorization: Bearer <token>` header on every routed request
-- Validate the JWT by calling Auth Service before forwarding any protected route
+- Validate user JWTs by calling Auth Service before forwarding any protected external route
+- Forward the original `Authorization: Bearer <user-token>` header and authenticated user context headers to downstream services
 - Return `401 Unauthorized` if token is missing or invalid
 - No business logic
 
@@ -68,7 +73,7 @@ POST  /api/v1/auth/register       → auth-service:8081   (no auth check)
 
 **Filter chain:**
 1. Extract `Authorization` header
-2. For protected routes, call `GET auth-service:8081/api/v1/auth/validate` with the token
+2. For protected routes, call `GET auth-service:8081/api/v1/auth/validate-user` with the token
 3. If `200 OK` → forward request downstream
 4. If `401` → return 401 immediately, do not forward
 
@@ -76,10 +81,14 @@ POST  /api/v1/auth/register       → auth-service:8081   (no auth check)
 
 ## Service 2 — Auth Service (Port 8081)
 
+On successful Gateway validation, the Gateway forwards the original bearer token plus `X-User-Id`, `X-User-Email`, and `X-User-Role` headers. API Gateway does not issue service tokens; service-to-service tokens are requested directly from Auth Service by internal services using client credentials.
+
 **Technology:** Spring Security, JJWT library
 
 **Database:** `auth_db`
-**Table:** `users (id, username, email, password_hash, role, created_at)`
+**Tables:**
+- `users (id, username, email, password_hash, role, created_at)`
+- `service_clients (id, client_id, service_name, client_secret_hash, scopes, enabled, created_at)`
 
 **Endpoints:**
 
@@ -94,13 +103,47 @@ POST /api/v1/auth/login
   Response: { token, expiresIn }
   Logic: verify password hash → issue signed JWT (expiry: 24h)
 
-GET  /api/v1/auth/validate
+GET  /api/v1/auth/validate-user
   Header:   Authorization: Bearer <token>
-  Response: 200 OK { userId, email, role } | 401 Unauthorized
-  Logic: verify signature + expiry; return claims if valid
+  Response: 200 OK { userId, email, role, audience } | 401 Unauthorized
+  Logic: verify signature + expiry + token type USER + audience zbank-api; return claims if valid
+
+POST /api/v1/auth/service-token
+  Request:  { clientId, clientSecret, scope, audience }
+  Response: { token, tokenType: "Bearer", expiresIn }
+  Logic: verify service client credentials + requested scope + allowed audience -> issue signed service JWT (expiry: 15m)
+
+GET  /api/v1/auth/validate-service
+  Header:   Authorization: Bearer <service-token>
+  Query:    audience={expectedAudience}
+  Response: 200 OK { clientId, serviceName, scopes, audience } | 401 Unauthorized
+  Logic: verify signature + expiry + token type SERVICE + expected audience; return service claims if valid
 ```
 
-**JWT Claims:** `{ sub: userId, email, role, iat, exp }`
+**User JWT Claims:** `{ sub: userId, email, role, tokenType: "USER", aud: "zbank-api", iat, exp }`
+
+**Service JWT Claims:** `{ sub: clientId, serviceName, scopes, tokenType: "SERVICE", aud: "<target-service>", iat, exp }`
+
+**Audience rules:**
+- User tokens must always use `aud = zbank-api`.
+- Service tokens must use the receiving service name as the audience, for example `aud = credit-rating-service`.
+- Auth Service must only issue service tokens for audiences allowed for that service client.
+- Receivers must reject tokens whose `aud` does not exactly match their own service name.
+- Audience mismatch -> `403 Forbidden`.
+
+**Implementation note:** Do not infer audience from the caller. For service tokens, the caller must explicitly request the target audience, and Auth Service must verify that the requested audience is allowed for the authenticated service client before issuing the JWT.
+
+**M2M Validations:**
+- Disabled service client -> `401 Unauthorized`
+- Invalid service credentials -> `401 Unauthorized`
+- Requested scope not assigned to service client -> `403 Forbidden`
+- Requested audience not assigned to service client -> `403 Forbidden`
+
+**Seed service clients for local development:**
+- `card-application-service`: scopes `credit-score:read`, audiences `credit-rating-service`
+- `card-activation-service`: scopes `card-activated:publish`, audiences `zbank-broker`
+- `card-management-service`: scopes `card-activated:consume`, audiences `zbank-broker`
+- `notification-service`: scopes `card-activated:consume`, audiences `zbank-broker`
 
 **Validations:**
 - Duplicate email → `409 Conflict`
@@ -132,13 +175,17 @@ POST /api/v1/applications
 **Internal flow:**
 1. Validate all mandatory fields and formats (see Validations section)
 2. Extract `customerId` from JWT (via Auth Service validate call through Gateway)
-3. Make a **synchronous REST call** to Credit Rating Service:
+3. Request an M2M service token from Auth Service using the `card-application-service` client credentials, scope `credit-score:read`, and audience `credit-rating-service`
+4. Make a **synchronous REST call** to Credit Rating Service with `Authorization: Bearer <service-token>`:
    `GET credit-rating-service:8083/api/v1/credit-score?documentNumber={docNumber}&annualSalary={salary}&existingCards={count}`
-4. Store application record with returned credit score and status `PENDING`
-5. Publish async event `ApplicationSubmitted` to the message broker:
+5. Store application record with returned credit score and status `PENDING`
+6. Publish async event `ApplicationSubmitted` to the message broker:
    ```json
    {
      "eventType": "APPLICATION_SUBMITTED",
+     "producerService": "card-application-service",
+     "correlationId": "request-correlation-id",
+     "eventTimestamp": "2026-06-20T10:00:00Z",
      "applicationId": "uuid",
      "customerId": "uuid",
      "creditScore": 500,
@@ -147,7 +194,7 @@ POST /api/v1/applications
      "customerName": "name"
    }
    ```
-6. Return `202 Accepted`
+7. Return `202 Accepted`
 
 **Validations:**
 - `fullName`: mandatory, non-empty
@@ -170,8 +217,17 @@ POST /api/v1/applications
 
 ```
 GET /api/v1/credit-score?documentNumber=&annualSalary=&existingCards=
+  Header:   Authorization: Bearer <service-token>
   Response: { documentNumber, score, source }
 ```
+
+**M2M authorization:**
+- Validate the service token by calling `GET auth-service:8081/api/v1/auth/validate-service?audience=credit-rating-service`
+- Require `tokenType = SERVICE`
+- Require scope `credit-score:read`
+- Require `aud = credit-rating-service`
+- Return `401 Unauthorized` for missing/invalid/expired service token
+- Return `403 Forbidden` when the service token is valid but does not include the required scope or expected audience
 
 **Scoring logic (implement as a functional-style pipeline using Java Streams / Optional):**
 
@@ -222,6 +278,9 @@ credit_score == 50  → status = DOCUMENTS_REQUIRED (request additional docs)
    ```json
    {
      "eventType": "CARD_ACTIVATED",
+     "producerService": "card-activation-service",
+     "correlationId": "request-correlation-id",
+     "eventTimestamp": "2026-06-20T10:00:00Z",
      "applicationId": "uuid",
      "customerId": "uuid",
      "customerEmail": "email",
@@ -339,9 +398,28 @@ Queues:
 
 Both `card-management-queue` and `notification-queue` must bind to the same routing key so both services receive the same `CardActivated` event independently (fan-out pattern).
 
+**Broker authentication and event identity:**
+- RabbitMQ username/password protects broker connections for publishers and consumers.
+- Each service must use its own configurable broker username/password in production.
+- Event payloads must include `producerService`, `correlationId`, and `eventTimestamp` for auditability and cross-service tracing.
+- Consumers must validate the expected `eventType` and ignore or dead-letter malformed events.
+
 ---
 
 ## Cross-Cutting Requirements (from Validations & Review slide)
+
+### 0. Authentication & Authorization
+- External client requests use user JWTs issued by Auth Service.
+- API Gateway validates user JWTs with `GET /api/v1/auth/validate-user` before forwarding protected routes.
+- Internal synchronous REST calls use service JWTs issued by `POST /api/v1/auth/service-token`.
+- Internal REST receivers validate service JWTs with `GET /api/v1/auth/validate-service` and enforce required scopes.
+- User JWTs must include `aud = zbank-api`.
+- Service JWTs must include `aud = <target-service>`.
+- Receivers must reject JWTs when the `aud` claim does not match the expected audience.
+- User JWTs must not be accepted as service JWTs, and service JWTs must not be accepted as user JWTs.
+- Service client secrets must be stored hashed with BCrypt, never as plaintext.
+- Service tokens must be short-lived, defaulting to 15 minutes.
+- RabbitMQ username/password protects event transport; event payload metadata provides producer identity and traceability.
 
 ### 1. Mandatory & Format Validations
 Use Bean Validation (`@Valid`, `@NotBlank`, `@NotNull`, `@Pattern`, `@Min`, `@Email`) on all request DTOs. Return `400 Bad Request` with a structured error body on validation failure:
@@ -417,6 +495,9 @@ Never expose stack traces in API responses.
 ```json
 {
   "eventType": "APPLICATION_SUBMITTED",
+  "producerService": "card-application-service",
+  "correlationId": "request-correlation-id",
+  "eventTimestamp": "2026-06-20T10:00:00Z",
   "applicationId": "550e8400-e29b-41d4-a716-446655440000",
   "customerId": "user-uuid",
   "customerEmail": "john@example.com",
@@ -430,6 +511,9 @@ Never expose stack traces in API responses.
 ```json
 {
   "eventType": "CARD_ACTIVATED",
+  "producerService": "card-activation-service",
+  "correlationId": "request-correlation-id",
+  "eventTimestamp": "2026-06-20T10:00:00Z",
   "applicationId": "550e8400-e29b-41d4-a716-446655440000",
   "customerId": "user-uuid",
   "customerEmail": "john@example.com",
@@ -468,6 +552,24 @@ Never expose stack traces in API responses.
 
 ---
 
+## System Authentication Journey
+
+```
+1. User registers through API Gateway -> Auth Service stores user with BCrypt password hash.
+2. User logs in through API Gateway -> Auth Service returns a USER JWT valid for 24 hours with aud=zbank-api.
+3. User calls a protected route with Authorization: Bearer <user-token>.
+4. API Gateway calls Auth Service /api/v1/auth/validate-user.
+5. Auth Service validates tokenType USER, aud=zbank-api, signature, and expiry, then returns user claims.
+6. API Gateway forwards the request to the target service with the original user token plus X-User-* context headers.
+7. Card Application needs Credit Rating, so it calls Auth Service /api/v1/auth/service-token using card-application-service client credentials, scope credit-score:read, and audience credit-rating-service.
+8. Auth Service validates the service client secret, scope, and allowed audience, then returns a short-lived SERVICE JWT with aud=credit-rating-service.
+9. Card Application calls Credit Rating with Authorization: Bearer <service-token>.
+10. Credit Rating calls Auth Service /api/v1/auth/validate-service?audience=credit-rating-service, requires tokenType SERVICE, aud=credit-rating-service, and scope credit-score:read, then returns the credit score.
+11. Async events are sent through RabbitMQ using broker credentials; event metadata carries producerService, correlationId, and eventTimestamp.
+```
+
+---
+
 ## Docker Compose (for local dev)
 
 Provide a `docker-compose.yml` at the project root:
@@ -477,15 +579,16 @@ services:
     image: rabbitmq:3-management
     ports: ["5672:5672", "15672:15672"]
 
-  postgres:
-    image: postgres:15
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
     environment:
-      POSTGRES_USER: zbank
-      POSTGRES_PASSWORD: zbank
-    ports: ["5432:5432"]
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "ZBank@12345"
+      MSSQL_PID: "Developer"
+    ports: ["1433:1433"]
 ```
 
-Each service's `application.yml` should support both H2 (default dev profile) and PostgreSQL (prod profile).
+Each service's `application.yml` should use Microsoft SQL Server connection settings. Local development should target the Docker Compose SQL Server instance, and production settings should point to the appropriate managed or hosted SQL Server instance.
 
 ---
 
@@ -493,9 +596,9 @@ Each service's `application.yml` should support both H2 (default dev profile) an
 
 - [ ] Parent `pom.xml` with all 7 modules declared
 - [ ] `common` module with shared event POJOs, DTOs, and custom exceptions
-- [ ] All 6 Spring Boot services, each runnable independently on their assigned port
+- [ ] All 7 Spring Boot services, each runnable independently on their assigned port
 - [ ] RabbitMQ configuration class in each consuming service
 - [ ] Global exception handler in every service
 - [ ] Unit tests for all service-layer classes
-- [ ] `docker-compose.yml` for RabbitMQ and PostgreSQL
+- [ ] `docker-compose.yml` for RabbitMQ and Microsoft SQL Server
 - [ ] `README.md` with startup instructions and sample cURL commands for the full end-to-end flow
