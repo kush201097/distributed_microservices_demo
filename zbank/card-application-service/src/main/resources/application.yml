@@ -1,0 +1,55 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: card-application-service
+
+  # ── Microsoft SQL Server ─────────────────────────────────────────────
+  datasource:
+    url: jdbc:sqlserver://localhost:1433;databaseName=app_db;encrypt=false;trustServerCertificate=true
+    driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+    username: sa
+    password: ZBank@12345
+
+  jpa:
+    database-platform: org.hibernate.dialect.SQLServerDialect
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+  # ── RabbitMQ ─────────────────────────────────────────────────────────
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+
+# ── RabbitMQ exchange / routing-key names ───────────────────────────
+app:
+  rabbitmq:
+    exchange: zbank.exchange
+    routing-key:
+      application-submitted: zbank.application.submitted
+
+  # Credit Rating Service URL (for OpenFeign / RestTemplate fallback)
+  credit-rating-service-url: http://localhost:8083
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+  datasource:
+    url: jdbc:sqlserver://your-mssql-server:1433;databaseName=app_db;encrypt=true;trustServerCertificate=false
+    username: zbank
+    password: your-prod-password
+  jpa:
+    hibernate:
+      ddl-auto: validate
